@@ -133,6 +133,10 @@ def money(value, field: str, allow_zero: bool = True) -> int:
     return parsed
 
 
+def redeem_cost(value: int) -> int:
+    return (int(value) * 110 + 99) // 100
+
+
 def normalize_color(value) -> str:
     raw = str(value or "").strip()
     if not raw:
@@ -165,8 +169,48 @@ def find_player(state: dict, player_id: str) -> dict:
 def find_property(player: dict, property_id: str) -> dict:
     for prop in player["properties"]:
         if prop["id"] == property_id:
+            ensure_property_shape(prop)
             return prop
     raise ValueError("找不到房产")
+
+
+def ensure_property_shape(prop: dict) -> None:
+    prop.setdefault("landValue", prop.get("assetValue", 0))
+    prop.setdefault("buildings", [])
+    prop.setdefault("mortgaged", False)
+    if prop.get("mortgaged"):
+        prop.setdefault("mortgageValue", prop.get("assetValue", 0))
+
+
+def green_house_count(prop: dict) -> int:
+    ensure_property_shape(prop)
+    return sum(1 for building in prop["buildings"] if building.get("type") == "house")
+
+
+def hotel_building(prop: dict) -> dict | None:
+    ensure_property_shape(prop)
+    for building in prop["buildings"]:
+        if building.get("type") == "hotel":
+            return building
+    return None
+
+
+def has_buildings(prop: dict) -> bool:
+    ensure_property_shape(prop)
+    return bool(prop["buildings"])
+
+
+def building_count_for_bonus(prop: dict) -> int:
+    ensure_property_shape(prop)
+    if hotel_building(prop):
+        return 5
+    return green_house_count(prop)
+
+
+def restore_property_in_place(prop: dict, old_prop: dict) -> None:
+    prop.clear()
+    prop.update(clone(old_prop))
+    ensure_property_shape(prop)
 
 
 def find_log(state: dict, log_id: str) -> dict:
@@ -262,20 +306,31 @@ def apply_undo(state: dict, entry: dict) -> None:
         prop = find_property(player, undo["propertyId"])
         prop["name"] = undo["name"]
         prop["toll"] = undo["toll"]
+        prop["colorSetAmount"] = undo.get("colorSetAmount", prop.get("colorSetAmount", 0))
 
     elif undo_type == "upgradeProperty":
         player = find_player(state, undo["playerId"])
         prop = find_property(player, undo["propertyId"])
         player["cash"] += undo["cost"]
-        prop["assetValue"] -= undo["cost"]
-        prop["toll"] = undo["toll"]
+        restore_property_in_place(prop, undo["property"])
 
     elif undo_type == "mortgageProperty":
         player = find_player(state, undo["playerId"])
         prop = find_property(player, undo["propertyId"])
         player["cash"] -= undo["amount"]
-        prop.clear()
-        prop.update(clone(undo["property"]))
+        restore_property_in_place(prop, undo["property"])
+
+    elif undo_type == "redeemProperty":
+        player = find_player(state, undo["playerId"])
+        prop = find_property(player, undo["propertyId"])
+        player["cash"] += undo["cost"]
+        restore_property_in_place(prop, undo["property"])
+
+    elif undo_type == "sellBuilding":
+        player = find_player(state, undo["playerId"])
+        prop = find_property(player, undo["propertyId"])
+        player["cash"] -= undo["income"]
+        restore_property_in_place(prop, undo["property"])
 
     elif undo_type == "collectRent":
         receiver = find_player(state, undo["receiverId"])
@@ -358,7 +413,7 @@ def apply_action(room: Room, payload: dict) -> dict:
             require_actor(state, payload, player["id"])
             name = str(payload.get("name", "")).strip()
             if not name:
-                raise ValueError("房产名称不能为空")
+                raise ValueError("土地名称不能为空")
             cost = money(payload.get("cost"), "购买金额")
             toll = money(payload.get("toll"), "过路费")
             player["cash"] -= cost
@@ -366,14 +421,17 @@ def apply_action(room: Room, payload: dict) -> dict:
                 "id": make_id("h_", 8),
                 "name": name,
                 "toll": toll,
+                "colorSetAmount": 0,
+                "landValue": cost,
                 "assetValue": cost,
+                "buildings": [],
                 "mortgaged": False,
                 "createdAt": datetime.now().isoformat(timespec="seconds"),
             }
             player["properties"].append(prop)
             append_log(
                 state,
-                f"{player['name']} 购买 {name}，花费 {cost}，过路费 {toll}",
+                f"{player['name']} 买地 {name}，花费 {cost}，过路费 {toll}",
                 action_type=action_type,
                 actor_player_id=player["id"],
                 undo={"type": "addProperty", "playerId": player["id"], "propertyId": prop["id"], "cost": cost},
@@ -385,12 +443,14 @@ def apply_action(room: Room, payload: dict) -> dict:
             prop = find_property(player, payload.get("propertyId"))
             name = str(payload.get("name", "")).strip()
             if not name:
-                raise ValueError("房产名称不能为空")
+                raise ValueError("土地名称不能为空")
             toll = money(payload.get("toll"), "过路费")
             old_name = prop["name"]
             old_toll = prop["toll"]
+            old_color_set_amount = prop.get("colorSetAmount", 0)
             prop["name"] = name
             prop["toll"] = toll
+            prop["colorSetAmount"] = money(payload.get("colorSetAmount", old_color_set_amount), "同色集齐金额")
             append_log(
                 state,
                 f"{player['name']} 修改 {name}，过路费 {toll}",
@@ -402,6 +462,7 @@ def apply_action(room: Room, payload: dict) -> dict:
                     "propertyId": prop["id"],
                     "name": old_name,
                     "toll": old_toll,
+                    "colorSetAmount": old_color_set_amount,
                 },
             )
 
@@ -409,16 +470,34 @@ def apply_action(room: Room, payload: dict) -> dict:
             player = find_player(state, payload.get("playerId"))
             require_actor(state, payload, player["id"])
             prop = find_property(player, payload.get("propertyId"))
-            cost = money(payload.get("cost"), "升级金额", allow_zero=False)
+            if prop.get("mortgaged"):
+                raise ValueError("土地已抵押，不能建房子")
+            if hotel_building(prop):
+                raise ValueError("已有红色房子，不能继续建房子")
+            cost = money(payload.get("cost"), "建房子金额", allow_zero=False)
             toll = payload.get("toll")
-            old_toll = prop["toll"]
+            old_prop = clone(prop)
             if toll not in (None, ""):
-                prop["toll"] = money(toll, "新过路费")
+                prop["toll"] = money(toll, "建房子后过路费")
             player["cash"] -= cost
             prop["assetValue"] += cost
+            houses = [building for building in prop["buildings"] if building.get("type") == "house"]
+            if len(houses) >= 4:
+                prop["buildings"] = [
+                    {
+                        "id": make_id("b_", 8),
+                        "type": "hotel",
+                        "cost": cost,
+                        "houseCosts": [house.get("cost", 0) for house in houses[:4]],
+                    }
+                ]
+                build_text = "红色房子"
+            else:
+                prop["buildings"].append({"id": make_id("b_", 8), "type": "house", "cost": cost})
+                build_text = "绿色房子"
             append_log(
                 state,
-                f"{player['name']} 升级 {prop['name']}，花费 {cost}",
+                f"{player['name']} 给 {prop['name']} 建{build_text}，花费 {cost}",
                 action_type=action_type,
                 actor_player_id=player["id"],
                 undo={
@@ -426,7 +505,7 @@ def apply_action(room: Room, payload: dict) -> dict:
                     "playerId": player["id"],
                     "propertyId": prop["id"],
                     "cost": cost,
-                    "toll": old_toll,
+                    "property": old_prop,
                 },
             )
 
@@ -434,12 +513,17 @@ def apply_action(room: Room, payload: dict) -> dict:
             player = find_player(state, payload.get("playerId"))
             require_actor(state, payload, player["id"])
             prop = find_property(player, payload.get("propertyId"))
+            if prop.get("mortgaged"):
+                raise ValueError("土地已经抵押")
+            if has_buildings(prop):
+                raise ValueError("土地上有房子，请先卖房")
             amount = money(payload.get("amount"), "抵押价值")
             old_prop = clone(prop)
             player["cash"] += amount
             prop["assetValue"] = amount
             prop["mortgaged"] = True
             prop["mortgageValue"] = amount
+            prop["preMortgageAssetValue"] = old_prop.get("assetValue", amount)
             append_log(
                 state,
                 f"{player['name']} 抵押 {prop['name']}，获得 {amount}",
@@ -454,6 +538,75 @@ def apply_action(room: Room, payload: dict) -> dict:
                 },
             )
 
+        elif action_type == "redeemProperty":
+            player = find_player(state, payload.get("playerId"))
+            require_actor(state, payload, player["id"])
+            prop = find_property(player, payload.get("propertyId"))
+            if not prop.get("mortgaged"):
+                raise ValueError("土地未抵押")
+            mortgage_value = money(prop.get("mortgageValue", prop.get("assetValue", 0)), "抵押价值")
+            cost = redeem_cost(mortgage_value)
+            old_prop = clone(prop)
+            player["cash"] -= cost
+            prop["mortgaged"] = False
+            prop["assetValue"] = prop.get("preMortgageAssetValue", prop.get("landValue", mortgage_value))
+            prop.pop("preMortgageAssetValue", None)
+            append_log(
+                state,
+                f"{player['name']} 赎回 {prop['name']}，花费 {cost}",
+                action_type=action_type,
+                actor_player_id=player["id"],
+                undo={
+                    "type": "redeemProperty",
+                    "playerId": player["id"],
+                    "propertyId": prop["id"],
+                    "cost": cost,
+                    "property": old_prop,
+                },
+            )
+
+        elif action_type == "sellBuilding":
+            player = find_player(state, payload.get("playerId"))
+            require_actor(state, payload, player["id"])
+            prop = find_property(player, payload.get("propertyId"))
+            if not has_buildings(prop):
+                raise ValueError("该土地没有可卖的房子")
+            old_prop = clone(prop)
+            hotel = hotel_building(prop)
+            if hotel:
+                sold_cost = money(hotel.get("cost", 0), "红色房子金额")
+                income = sold_cost // 2
+                prop["assetValue"] -= sold_cost
+                prop["buildings"] = [
+                    {"id": make_id("b_", 8), "type": "house", "cost": cost}
+                    for cost in hotel.get("houseCosts", [])[:4]
+                ]
+                text = f"{player['name']} 卖出 {prop['name']} 的红色房子，获得 {income}"
+            else:
+                building = prop["buildings"].pop()
+                sold_cost = money(building.get("cost", 0), "绿色房子金额")
+                income = sold_cost // 2
+                prop["assetValue"] -= sold_cost
+                text = f"{player['name']} 卖出 {prop['name']} 的绿色房子，获得 {income}"
+            toll = payload.get("toll")
+            if toll not in (None, ""):
+                prop["toll"] = money(toll, "卖房后过路费")
+            prop["assetValue"] = max(prop.get("landValue", 0), prop["assetValue"])
+            player["cash"] += income
+            append_log(
+                state,
+                text,
+                action_type=action_type,
+                actor_player_id=player["id"],
+                undo={
+                    "type": "sellBuilding",
+                    "playerId": player["id"],
+                    "propertyId": prop["id"],
+                    "income": income,
+                    "property": old_prop,
+                },
+            )
+
         elif action_type == "collectRent":
             receiver = find_player(state, payload.get("receiverId"))
             require_actor(state, payload, receiver["id"])
@@ -461,12 +614,18 @@ def apply_action(room: Room, payload: dict) -> dict:
             if receiver["id"] == payer["id"]:
                 raise ValueError("收款人和付款人不能相同")
             prop = find_property(receiver, payload.get("propertyId"))
+            if prop.get("mortgaged"):
+                raise ValueError("土地已抵押，不能收过路费")
             amount = money(payload.get("amount", prop["toll"]), "收款金额")
+            color_set_amount = money(prop.get("colorSetAmount", 0), "同色集齐金额")
+            color_set_extra = color_set_amount * building_count_for_bonus(prop)
+            amount += color_set_extra
             payer["cash"] -= amount
             receiver["cash"] += amount
+            extra_text = f"，同色集齐加收 {color_set_extra}" if color_set_extra else ""
             append_log(
                 state,
-                f"{receiver['name']} 向 {payer['name']} 收取 {prop['name']} 过路费 {amount}",
+                f"{receiver['name']} 向 {payer['name']} 收取 {prop['name']} 过路费 {amount}{extra_text}",
                 action_type=action_type,
                 actor_player_id=receiver["id"],
                 undo={
