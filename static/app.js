@@ -11,6 +11,9 @@ let pendingPassStartPlayerId = "";
 let pendingPassStartTimer = null;
 let pendingUndoLogId = "";
 let pendingUndoTimer = null;
+let propertySortMode = "player";
+let propertyViewMode = "detail";
+let auditTab = "count";
 
 const qs = (selector, root = document) => root.querySelector(selector);
 const qsa = (selector, root = document) => [...root.querySelectorAll(selector)];
@@ -58,6 +61,65 @@ function playerColor(player) {
 
 function colorStyle(player) {
   return `style="--player-color:${escapeHtml(playerColor(player))}"`;
+}
+
+function buildings(prop) {
+  return prop.buildings || [];
+}
+
+function greenHouses(prop) {
+  return buildings(prop).filter((building) => building.type === "house");
+}
+
+function hotelBuilding(prop) {
+  return buildings(prop).find((building) => building.type === "hotel");
+}
+
+function hasBuildings(prop) {
+  return buildings(prop).length > 0;
+}
+
+function canBuild(prop) {
+  return !prop.mortgaged && !hotelBuilding(prop);
+}
+
+function mortgageRedeemCost(prop) {
+  return Math.ceil(Number(prop.mortgageValue || prop.assetValue || 0) * 1.1);
+}
+
+function buildingBonusCount(prop) {
+  return hotelBuilding(prop) ? 5 : greenHouses(prop).length;
+}
+
+function colorSetAmount(prop) {
+  return Number(prop.colorSetAmount || 0);
+}
+
+function rentTotal(prop, baseAmount = Number(prop.toll || 0)) {
+  return Number(baseAmount || 0) + colorSetAmount(prop) * buildingBonusCount(prop);
+}
+
+function colorSetExtra(prop) {
+  return colorSetAmount(prop) * buildingBonusCount(prop);
+}
+
+function renderBuildingMarkers(prop) {
+  const hotel = hotelBuilding(prop);
+  const houses = greenHouses(prop);
+  if (!hotel && !houses.length) return "";
+  return `
+    <div class="building-markers" aria-label="建筑">
+      ${hotel ? `<span class="hotel-marker" title="红色房子"></span>` : houses.map(() => `<span class="house-marker" title="绿色房子"></span>`).join("")}
+    </div>
+  `;
+}
+
+function propertyOwner(propertyId) {
+  for (const player of room.players || []) {
+    const prop = player.properties.find((item) => item.id === propertyId);
+    if (prop) return { player, prop };
+  }
+  return null;
 }
 
 function roomIdFromPath() {
@@ -249,6 +311,7 @@ function pageShell(content) {
         </div>
         <div class="top-actions">
           ${room?.started ? `<button class="top-chip" data-action="show-ranking">排名</button>` : ""}
+          ${room?.started ? `<button class="top-chip" data-action="show-properties">房产</button>` : ""}
           ${room?.started ? `<button class="top-chip" data-action="show-audit">盘点</button>` : ""}
           ${room?.started ? `<button class="top-chip" data-action="show-log">记录</button>` : ""}
           ${room ? `<button class="top-chip secondary" data-action="qr">加入</button>` : ""}
@@ -357,13 +420,14 @@ function renderCashBoard(players, myPlayerId = "") {
       </div>
       <div class="cash-list">
         ${players.map((player) => `
-          <div class="cash-row ${player.id === myPlayerId ? "mine" : ""} ${leaders.includes(player.id) ? "leader" : ""}" ${colorStyle(player)}>
+          <div class="cash-row ${player.id === myPlayerId ? "mine" : ""} ${leaders.includes(player.id) ? "leader" : ""} ${Number(player.cash || 0) <= 0 ? "bust" : ""}" ${colorStyle(player)}>
             <div>
               <strong>${escapeHtml(player.name)}</strong>
-              ${leaders.includes(player.id) ? `<span class="leader-badge">第1</span>` : ""}
+              ${leaders.includes(player.id) ? `<span class="leader-badge">Top1</span>` : ""}
               ${player.id === myPlayerId ? `<span>我</span>` : ""}
             </div>
             <em class="${player.cash < 0 ? "cash-negative" : ""}">${formatMoney(player.cash)}</em>
+            ${Number(player.cash || 0) <= 0 ? `<small>立刻卖房或抵押</small>` : ""}
           </div>
         `).join("")}
       </div>
@@ -416,6 +480,7 @@ function renderPlayerCard(player) {
   const total = netWorth(player);
   const cashClass = player.cash < 0 ? "cash-negative" : "";
   const confirmPass = pendingPassStartPlayerId === player.id;
+  const hasRentableProperty = player.properties.some((prop) => !prop.mortgaged);
   return `
     <article class="player-card" data-player-id="${player.id}">
       <div class="player-head">
@@ -445,10 +510,9 @@ function renderPlayerCard(player) {
         <button class="start-button ${confirmPass ? "confirm" : ""}" data-action="pass-start" data-player-id="${player.id}">
           ${confirmPass ? "确认" : "起点"} +${formatMoney(room.passStartAmount || 0)}
         </button>
-        <button data-action="collect-rent" data-player-id="${player.id}" ${player.properties.length && room.players.length > 1 ? "" : "disabled"}>收钱</button>
-        <button class="secondary" data-action="cash-adjust" data-player-id="${player.id}">加减</button>
-        <button class="blue" data-action="add-property" data-player-id="${player.id}">买房</button>
-        <button class="warning" data-action="mortgage" data-player-id="${player.id}" ${player.properties.length ? "" : "disabled"}>抵押</button>
+        <button data-action="collect-rent" data-player-id="${player.id}" ${hasRentableProperty && room.players.length > 1 ? "" : "disabled"}>收钱</button>
+        <button class="secondary" data-action="cash-adjust" data-player-id="${player.id}">自定义</button>
+        <button class="blue" data-action="add-property" data-player-id="${player.id}">买地</button>
       </div>
       <div class="property-section-title">房产</div>
       <div class="property-list">
@@ -459,19 +523,31 @@ function renderPlayerCard(player) {
 }
 
 function renderPropertyRow(player, prop) {
+  const hotel = hotelBuilding(prop);
+  const houses = greenHouses(prop);
+  const thirdAction = hasBuildings(prop)
+    ? `<button class="warning" data-action="sell-building" data-player-id="${player.id}" data-property-id="${prop.id}">卖房</button>`
+    : prop.mortgaged
+      ? `<button class="warning" data-action="redeem-property" data-player-id="${player.id}" data-property-id="${prop.id}">赎回</button>`
+      : `<button class="warning" data-action="mortgage-property" data-player-id="${player.id}" data-property-id="${prop.id}">抵押</button>`;
   return `
     <div class="property-row">
       <div class="property-main">
         <div class="property-title">
           <strong>${escapeHtml(prop.name)}</strong>
-          <span>过路费 ${formatMoney(prop.toll)} · 固定资产 ${formatMoney(prop.assetValue)}</span>
+          <span>过路费 ${formatMoney(rentTotal(prop))} · 固定资产 ${formatMoney(prop.assetValue)}</span>
+          ${colorSetAmount(prop) ? `<span class="color-set-line">基础 ${formatMoney(prop.toll)} + 同色 ${formatMoney(colorSetExtra(prop))}</span>` : ""}
+          ${renderBuildingMarkers(prop)}
         </div>
-        ${prop.mortgaged ? `<span class="badge red">已抵押</span>` : `<span class="badge">持有</span>`}
+        ${prop.mortgaged ? `<span class="badge red">已抵押</span>` : hotel ? `<span class="badge red">红房子</span>` : houses.length ? `<span class="badge">绿房子 ${houses.length}</span>` : `<span class="badge">土地</span>`}
       </div>
       <div class="property-actions">
         <button class="secondary" data-action="edit-property" data-player-id="${player.id}" data-property-id="${prop.id}">编辑</button>
-        <button class="blue" data-action="upgrade-property" data-player-id="${player.id}" data-property-id="${prop.id}">升级</button>
-        <button class="warning" data-action="mortgage-property" data-player-id="${player.id}" data-property-id="${prop.id}">抵押</button>
+        <button class="secondary color-set-button ${colorSetAmount(prop) ? "active" : ""}" data-action="color-set-property" data-player-id="${player.id}" data-property-id="${prop.id}">
+          ${colorSetAmount(prop) ? `+${formatMoney(colorSetAmount(prop))}` : "同色"}
+        </button>
+        <button class="blue" data-action="upgrade-property" data-player-id="${player.id}" data-property-id="${prop.id}" ${canBuild(prop) ? "" : "disabled"}>建房子</button>
+        ${thirdAction}
       </div>
     </div>
   `;
@@ -592,15 +668,42 @@ function renderAuditList() {
     return `<div class="empty">还没有收钱记录</div>`;
   }
 
-  const byCount = [...groups].sort((a, b) => b.count - a.count || b.total - a.total).slice(0, 5);
-  const byTotal = [...groups].sort((a, b) => b.total - a.total || b.count - a.count).slice(0, 5);
-  const bySingle = [...singleEvents].sort((a, b) => Number(b.amount || 0) - Number(a.amount || 0)).slice(0, 5);
+  const byCount = [...groups].sort((a, b) => b.count - a.count || b.total - a.total);
+  const byTotal = [...groups].sort((a, b) => b.total - a.total || b.count - a.count);
+  const bySingle = [...singleEvents].sort((a, b) => Number(b.amount || 0) - Number(a.amount || 0));
+  const tabs = {
+    count: {
+      label: "次数",
+      title: "路过被收钱次数最多",
+      items: byCount,
+      valueFn: (item) => `${item.count} 次`,
+      detailFn: (item) => `累计 ${formatMoney(item.total)}`,
+    },
+    total: {
+      label: "总额",
+      title: "收钱总额度最大",
+      items: byTotal,
+      valueFn: (item) => formatMoney(item.total),
+      detailFn: (item) => `${item.count} 次`,
+    },
+    single: {
+      label: "单次",
+      title: "单次收钱额度最大",
+      items: bySingle,
+      valueFn: (item) => formatMoney(item.amount),
+      detailFn: (item) => item.payerName ? `付款 ${escapeHtml(item.payerName)}` : "",
+    },
+  };
+  const tab = tabs[auditTab] || tabs.count;
 
   return `
     <div class="audit-list">
-      ${renderAuditSection("路过被收钱次数最多", byCount, (item) => `${item.count} 次`, (item) => `累计 ${formatMoney(item.total)}`)}
-      ${renderAuditSection("收钱总额度最大", byTotal, (item) => formatMoney(item.total), (item) => `${item.count} 次`)}
-      ${renderAuditSection("单次收钱额度最大", bySingle, (item) => formatMoney(item.amount), (item) => item.payerName ? `付款 ${escapeHtml(item.payerName)}` : "")}
+      <div class="segmented three">
+        ${Object.entries(tabs).map(([key, item]) => `
+          <button type="button" class="${auditTab === key ? "active" : ""}" data-action="switch-audit" data-audit-tab="${key}">${item.label}</button>
+        `).join("")}
+      </div>
+      ${renderAuditSection(tab.title, tab.items, tab.valueFn, tab.detailFn)}
     </div>
   `;
 }
@@ -625,6 +728,75 @@ function renderAuditSection(title, items, valueFn, detailFn) {
         }).join("")}
       </div>
     </section>
+  `;
+}
+
+function allPropertyItems() {
+  return (room.players || []).flatMap((player, playerIndex) =>
+    player.properties.map((prop) => ({ player, prop, playerIndex })),
+  );
+}
+
+function renderPropertyOverviewList(sortMode = propertySortMode) {
+  const items = allPropertyItems();
+  if (sortMode === "toll") {
+    items.sort((a, b) => Number(b.prop.toll || 0) - Number(a.prop.toll || 0) || a.playerIndex - b.playerIndex);
+  } else {
+    items.sort((a, b) => a.playerIndex - b.playerIndex || Number(b.prop.toll || 0) - Number(a.prop.toll || 0));
+  }
+
+  return `
+    <div class="property-overview">
+      <div class="segmented">
+        <button type="button" class="${sortMode === "player" ? "active" : ""}" data-action="sort-properties" data-sort="player">按玩家</button>
+        <button type="button" class="${sortMode === "toll" ? "active" : ""}" data-action="sort-properties" data-sort="toll">按过路费</button>
+      </div>
+      <div class="segmented">
+        <button type="button" class="${propertyViewMode === "detail" ? "active" : ""}" data-action="property-view" data-view="detail">详情</button>
+        <button type="button" class="${propertyViewMode === "compact" ? "active" : ""}" data-action="property-view" data-view="compact">缩略</button>
+      </div>
+      <div class="${propertyViewMode === "compact" ? "property-compact-grid" : "property-overview-list"}">
+        ${items.length ? items.map(({ player, prop }) => (
+          propertyViewMode === "compact" ? renderCompactPropertyCard(player, prop) : renderOverviewPropertyCard(player, prop)
+        )).join("") : `<div class="empty">暂无房产</div>`}
+      </div>
+    </div>
+  `;
+}
+
+function renderOverviewPropertyCard(player, prop) {
+  const hotel = hotelBuilding(prop);
+  const houses = greenHouses(prop);
+  return `
+    <div class="overview-property-card" ${colorStyle(player)}>
+      <div class="overview-property-head">
+        <div>
+          <strong>${escapeHtml(prop.name)}</strong>
+          <span><i class="player-dot"></i>${escapeHtml(player.name)}</span>
+        </div>
+        ${prop.mortgaged ? `<span class="badge red">已抵押</span>` : hotel ? `<span class="badge red">红房子</span>` : houses.length ? `<span class="badge">绿房子 ${houses.length}</span>` : `<span class="badge">土地</span>`}
+      </div>
+      ${renderBuildingMarkers(prop)}
+      <div class="overview-property-meta">
+        <span>过路费 <strong>${formatMoney(rentTotal(prop))}</strong>${colorSetAmount(prop) ? `<em>基础 ${formatMoney(prop.toll)} + 同色 ${formatMoney(colorSetExtra(prop))}</em>` : ""}</span>
+        <span>固定资产 <strong>${formatMoney(prop.assetValue)}</strong></span>
+      </div>
+    </div>
+  `;
+}
+
+function renderCompactPropertyCard(player, prop) {
+  const hotel = hotelBuilding(prop);
+  const houses = greenHouses(prop);
+  return `
+    <div class="compact-property-card ${prop.mortgaged ? "mortgaged" : ""}" ${colorStyle(player)}>
+      <div class="compact-property-top">
+        <strong>${escapeHtml(prop.name)}</strong>
+        ${hotel ? `<em class="compact-hotel">红</em>` : houses.length ? `<em class="compact-house">绿${houses.length}</em>` : ""}
+      </div>
+      <span>${formatMoney(rentTotal(prop))}</span>
+      ${renderBuildingMarkers(prop)}
+    </div>
   `;
 }
 
@@ -676,13 +848,13 @@ function showAddProperty(playerId) {
   if (!requireMine(playerId)) return;
   const player = getPlayer(playerId);
   openModal(
-    `${player.name} 买房`,
+    `${player.name} 买地`,
     `
       <div class="form-grid">
-        <label>房产名称<input name="name" maxlength="28" required /></label>
+        <label>土地名称<input name="name" maxlength="28" required /></label>
         <label>购买金额<input name="cost" type="number" inputmode="numeric" min="0" step="1" required /></label>
         <label>过路费<input name="toll" type="number" inputmode="numeric" min="0" step="1" required /></label>
-        ${formActions("买入")}
+        ${formActions("买地")}
       </div>
     `,
     (data) => postAction("addProperty", {
@@ -702,8 +874,9 @@ function showEditProperty(playerId, propertyId) {
     `编辑 ${prop.name}`,
     `
       <div class="form-grid">
-        <label>房产名称<input name="name" maxlength="28" value="${escapeHtml(prop.name)}" required /></label>
+        <label>土地名称<input name="name" maxlength="28" value="${escapeHtml(prop.name)}" required /></label>
         <label>过路费<input name="toll" type="number" inputmode="numeric" min="0" step="1" value="${prop.toll}" required /></label>
+        <label>同色集齐金额<input name="colorSetAmount" type="number" inputmode="numeric" min="0" step="1" value="${colorSetAmount(prop)}" /></label>
         <div class="form-actions three">
           <button class="secondary" type="button" data-modal-close>取消</button>
           <button class="danger" data-delete-property="${prop.id}" type="button">删除</button>
@@ -716,6 +889,7 @@ function showEditProperty(playerId, propertyId) {
       propertyId,
       name: data.get("name"),
       toll: data.get("toll"),
+      colorSetAmount: data.get("colorSetAmount"),
     }),
   );
   qs("[data-delete-property]", modal).addEventListener("click", async () => {
@@ -725,16 +899,43 @@ function showEditProperty(playerId, propertyId) {
   });
 }
 
-function showUpgradeProperty(playerId, propertyId) {
+function showColorSetProperty(playerId, propertyId) {
   if (!requireMine(playerId)) return;
   const prop = getProperty(playerId, propertyId);
   openModal(
-    `升级 ${prop.name}`,
+    `${prop.name} 同色集齐`,
     `
       <div class="form-grid">
-        <label>升级金额<input name="cost" type="number" inputmode="numeric" min="1" step="1" required /></label>
-        <label>升级后过路费<input name="toll" type="number" inputmode="numeric" min="0" step="1" value="${prop.toll}" /></label>
-        ${formActions("升级")}
+        <label>同色集齐金额<input name="colorSetAmount" type="number" inputmode="numeric" min="0" step="1" value="${colorSetAmount(prop)}" required /></label>
+        <p class="intro-copy">收钱时按建筑数量加收：绿色房子按栋数，红色房子按 5 栋。填 0 可关闭。</p>
+        ${formActions("保存")}
+      </div>
+    `,
+    (data) => postAction("updateProperty", {
+      playerId,
+      propertyId,
+      name: prop.name,
+      toll: prop.toll,
+      colorSetAmount: data.get("colorSetAmount"),
+    }),
+  );
+}
+
+function showUpgradeProperty(playerId, propertyId) {
+  if (!requireMine(playerId)) return;
+  const prop = getProperty(playerId, propertyId);
+  if (!canBuild(prop)) {
+    showToast(prop.mortgaged ? "土地已抵押，不能建房子" : "已有红色房子，不能继续建房子");
+    return;
+  }
+  const nextLabel = greenHouses(prop).length >= 4 ? "红色房子" : "绿色房子";
+  openModal(
+    `给 ${prop.name} 建${nextLabel}`,
+    `
+      <div class="form-grid">
+        <label>建房子金额<input name="cost" type="number" inputmode="numeric" min="1" step="1" required /></label>
+        <label>建房子后过路费<input name="toll" type="number" inputmode="numeric" min="0" step="1" value="${prop.toll}" /></label>
+        ${formActions("建房子")}
       </div>
     `,
     (data) => postAction("upgradeProperty", {
@@ -749,11 +950,12 @@ function showUpgradeProperty(playerId, propertyId) {
 function showMortgage(playerId, propertyId = "") {
   if (!requireMine(playerId)) return;
   const player = getPlayer(playerId);
-  if (!player.properties.length) {
-    showToast("该玩家没有可抵押房产");
+  const properties = player.properties.filter((prop) => !prop.mortgaged && !hasBuildings(prop));
+  if (!properties.length) {
+    showToast("没有可抵押土地；有房子的土地需要先卖房");
     return;
   }
-  const options = player.properties.map((prop) => `
+  const options = properties.map((prop) => `
     <option value="${prop.id}" ${prop.id === propertyId ? "selected" : ""}>
       ${escapeHtml(prop.name)} · 当前固定资产 ${formatMoney(prop.assetValue)}
     </option>
@@ -776,20 +978,74 @@ function showMortgage(playerId, propertyId = "") {
   );
 }
 
+function showRedeemProperty(playerId, propertyId) {
+  if (!requireMine(playerId)) return;
+  const prop = getProperty(playerId, propertyId);
+  if (!prop?.mortgaged) {
+    showToast("该土地未抵押");
+    return;
+  }
+  const cost = mortgageRedeemCost(prop);
+  openModal(
+    `赎回 ${prop.name}`,
+    `
+      <div class="form-grid">
+        <div class="form-static"><span>赎回价格</span><strong>${formatMoney(cost)}</strong></div>
+        ${formActions("赎回")}
+      </div>
+    `,
+    () => postAction("redeemProperty", { playerId, propertyId }),
+  );
+}
+
+function showSellBuilding(playerId, propertyId) {
+  if (!requireMine(playerId)) return;
+  const prop = getProperty(playerId, propertyId);
+  const hotel = hotelBuilding(prop);
+  const houses = greenHouses(prop);
+  if (!hotel && !houses.length) {
+    showToast("该土地没有可卖的房子");
+    return;
+  }
+  const soldCost = Number((hotel || houses[houses.length - 1]).cost || 0);
+  const income = Math.floor(soldCost / 2);
+  openModal(
+    `卖出 ${prop.name} 的${hotel ? "红色房子" : "绿色房子"}`,
+    `
+      <div class="form-grid">
+        <div class="form-static"><span>获得现金</span><strong>${formatMoney(income)}</strong></div>
+        ${hotel ? `<p class="intro-copy">卖出红色房子后，会变回四栋绿色小房子。</p>` : ""}
+        <label>卖房后过路费<input name="toll" type="number" inputmode="numeric" min="0" step="1" value="${prop.toll}" /></label>
+        ${formActions("卖房")}
+      </div>
+    `,
+    (data) => postAction("sellBuilding", {
+      playerId,
+      propertyId,
+      toll: data.get("toll"),
+    }),
+  );
+}
+
 function showCashAdjust(playerId) {
   if (!requireMine(playerId)) return;
   const player = getPlayer(playerId);
+  const tenPercent = Math.floor(Math.abs(Number(player.cash || 0)) * 0.1);
   openModal(
-    `${player.name} 现金调整`,
+    `${player.name} 自定义`,
     `
       <div class="form-grid">
+        <div class="quick-adjust">
+          <button type="button" class="secondary" data-quick-adjust="in" data-amount="${tenPercent}">+10% ${formatMoney(tenPercent)}</button>
+          <button type="button" class="secondary" data-quick-adjust="out" data-amount="${tenPercent}">-10% ${formatMoney(tenPercent)}</button>
+        </div>
         <label>类型
-          <select name="direction">
+          <select name="direction" id="cashDirection">
             <option value="in">收入</option>
             <option value="out">支出</option>
           </select>
         </label>
-        <label>金额<input name="amount" type="number" inputmode="numeric" min="1" step="1" required /></label>
+        <label>金额<input id="cashAmount" name="amount" type="number" inputmode="numeric" min="1" step="1" required /></label>
         <label>备注<input name="note" maxlength="24" placeholder="经过起点、事件卡、罚款" /></label>
         ${formActions("记账")}
       </div>
@@ -801,6 +1057,12 @@ function showCashAdjust(playerId) {
       note: data.get("note"),
     }),
   );
+  qsa("[data-quick-adjust]", modal).forEach((button) => {
+    button.addEventListener("click", () => {
+      qs("#cashDirection", modal).value = button.dataset.quickAdjust;
+      qs("#cashAmount", modal).value = button.dataset.amount;
+    });
+  });
 }
 
 async function passStart(playerId) {
@@ -893,7 +1155,8 @@ function showCollectRent(receiverId = "") {
     return;
   }
   const receiver = getPlayer(receiverId);
-  if (!receiver?.properties.length) {
+  const rentProperties = receiver?.properties.filter((prop) => !prop.mortgaged) || [];
+  if (!rentProperties.length) {
     showToast("你还没有可收钱的房产");
     return;
   }
@@ -910,6 +1173,7 @@ function showCollectRent(receiverId = "") {
         <label>收钱房产
           <select name="propertyId" id="propertySelect"></select>
         </label>
+        <div class="form-static" id="rentPreview"><span>预计收款</span><strong>0</strong></div>
         <label>收款金额
           <input name="amount" id="rentAmount" type="number" inputmode="numeric" min="0" step="1" required />
         </label>
@@ -927,24 +1191,43 @@ function showCollectRent(receiverId = "") {
   const payerSelect = qs("#payerSelect", modal);
   const propertySelect = qs("#propertySelect", modal);
   const rentAmount = qs("#rentAmount", modal);
+  const rentPreview = qs("#rentPreview strong", modal);
+
+  function selectedRentProperty() {
+    return rentProperties.find((prop) => prop.id === propertySelect.value) || rentProperties[0];
+  }
+
+  function syncRentAmount() {
+    const prop = selectedRentProperty();
+    const base = Number(rentAmount.value || prop?.toll || 0);
+    rentPreview.textContent = formatMoney(rentTotal(prop, base));
+  }
 
   function syncRentForm() {
-    propertySelect.innerHTML = receiver.properties.map((prop) => `
-      <option value="${prop.id}" data-toll="${prop.toll}">${escapeHtml(prop.name)} · ${formatMoney(prop.toll)}</option>
+    propertySelect.innerHTML = rentProperties.map((prop) => `
+      <option value="${prop.id}" data-toll="${prop.toll}">${escapeHtml(prop.name)} · ${formatMoney(rentTotal(prop))}</option>
     `).join("");
     const next = qsa("option", payerSelect).find((option) => !option.disabled);
     if (payerSelect.value === receiver.id && next) payerSelect.value = next.value;
-    rentAmount.value = propertySelect.selectedOptions[0]?.dataset.toll || 0;
+    rentAmount.value = selectedRentProperty()?.toll || 0;
+    syncRentAmount();
   }
   propertySelect.addEventListener("change", () => {
-    rentAmount.value = propertySelect.selectedOptions[0]?.dataset.toll || 0;
+    rentAmount.value = selectedRentProperty()?.toll || 0;
+    syncRentAmount();
   });
+  rentAmount.addEventListener("input", syncRentAmount);
   syncRentForm();
 }
 
 function showRankingModal() {
   if (!room?.started) return;
   openModal("实时排名", renderRankingList(room.players), () => true);
+}
+
+function showPropertiesModal() {
+  if (!room?.started) return;
+  openModal("全部房产", renderPropertyOverviewList(), () => true);
 }
 
 function showAuditModal() {
@@ -1053,7 +1336,18 @@ document.addEventListener("click", async (event) => {
     showQr();
   } else if (action === "show-ranking") {
     showRankingModal();
+  } else if (action === "show-properties") {
+    showPropertiesModal();
+  } else if (action === "sort-properties") {
+    propertySortMode = target.dataset.sort || "player";
+    showPropertiesModal();
+  } else if (action === "property-view") {
+    propertyViewMode = target.dataset.view || "detail";
+    showPropertiesModal();
   } else if (action === "show-audit") {
+    showAuditModal();
+  } else if (action === "switch-audit") {
+    auditTab = target.dataset.auditTab || "count";
     showAuditModal();
   } else if (action === "show-log") {
     showLogModal();
@@ -1061,10 +1355,16 @@ document.addEventListener("click", async (event) => {
     showAddProperty(target.dataset.playerId);
   } else if (action === "edit-property") {
     showEditProperty(target.dataset.playerId, target.dataset.propertyId);
+  } else if (action === "color-set-property") {
+    showColorSetProperty(target.dataset.playerId, target.dataset.propertyId);
   } else if (action === "upgrade-property") {
     showUpgradeProperty(target.dataset.playerId, target.dataset.propertyId);
   } else if (action === "mortgage" || action === "mortgage-property") {
     showMortgage(target.dataset.playerId, target.dataset.propertyId);
+  } else if (action === "redeem-property") {
+    showRedeemProperty(target.dataset.playerId, target.dataset.propertyId);
+  } else if (action === "sell-building") {
+    showSellBuilding(target.dataset.playerId, target.dataset.propertyId);
   } else if (action === "cash-adjust") {
     showCashAdjust(target.dataset.playerId);
   } else if (action === "pass-start") {

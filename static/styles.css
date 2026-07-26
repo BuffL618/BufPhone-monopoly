@@ -332,6 +332,26 @@ button.top-chip {
     var(--player-color);
 }
 
+.cash-row.bust {
+  border-color: #bd3f32;
+  border-top-color: #bd3f32;
+  background: #fff1ef;
+  animation: bust-flash 0.85s ease-in-out infinite;
+}
+
+.cash-row.bust em {
+  color: var(--red);
+}
+
+.cash-row small {
+  display: block;
+  margin-top: 5px;
+  color: var(--red);
+  font-size: 11px;
+  font-weight: 900;
+  line-height: 1.2;
+}
+
 .cash-row.leader,
 .rank-card.leader {
   position: relative;
@@ -595,7 +615,7 @@ button.top-chip {
 
 .player-actions {
   display: grid;
-  grid-template-columns: repeat(3, minmax(0, 1fr));
+  grid-template-columns: repeat(2, minmax(0, 1fr));
   gap: 6px;
   padding: 12px;
 }
@@ -613,6 +633,31 @@ button.top-chip {
 
 .player-actions .start-button.confirm {
   background: var(--red);
+}
+
+.color-set-button {
+  color: #fff;
+  background: #1f9d5a;
+}
+
+.color-set-button.active {
+  position: relative;
+  overflow: hidden;
+  color: #5f3a00;
+  background: #ffd76d;
+  box-shadow:
+    0 0 0 2px rgba(255, 205, 79, 0.85),
+    0 10px 20px rgba(154, 106, 0, 0.18);
+}
+
+.color-set-button.active::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  background: linear-gradient(115deg, transparent 0%, rgba(255, 255, 255, 0.58) 48%, transparent 68%);
+  transform: translateX(-120%);
+  animation: leader-shine 2.8s ease-in-out infinite;
 }
 
 .property-section-title {
@@ -649,6 +694,55 @@ button.top-chip {
   font-size: 12px;
 }
 
+.property-title .color-set-line {
+  color: var(--primary-strong);
+  font-weight: 800;
+}
+
+.building-markers {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  min-height: 18px;
+}
+
+.house-marker,
+.hotel-marker {
+  position: relative;
+  width: 16px;
+  height: 13px;
+  display: inline-block;
+  border-radius: 2px 2px 3px 3px;
+  background: #1f9d5a;
+  box-shadow: inset 0 -2px 0 rgba(0, 0, 0, 0.13);
+}
+
+.house-marker::before,
+.hotel-marker::before {
+  content: "";
+  position: absolute;
+  left: 2px;
+  top: -5px;
+  width: 11px;
+  height: 11px;
+  background: inherit;
+  transform: rotate(45deg);
+  border-radius: 2px;
+}
+
+.hotel-marker {
+  width: 20px;
+  height: 16px;
+  background: #c9332d;
+}
+
+.hotel-marker::before {
+  left: 3px;
+  top: -6px;
+  width: 14px;
+  height: 14px;
+}
+
 .badge {
   display: inline-flex;
   align-items: center;
@@ -669,7 +763,7 @@ button.top-chip {
 
 .property-actions {
   display: grid;
-  grid-template-columns: repeat(3, 1fr);
+  grid-template-columns: repeat(2, 1fr);
   gap: 6px;
   margin-top: 10px;
 }
@@ -790,6 +884,206 @@ button.top-chip {
   white-space: nowrap;
 }
 
+.property-overview {
+  display: grid;
+  gap: 12px;
+}
+
+.segmented {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 6px;
+  padding: 6px;
+  background: var(--surface-2);
+  border: 1px solid var(--line);
+  border-radius: 8px;
+}
+
+.segmented.three {
+  grid-template-columns: repeat(3, 1fr);
+}
+
+.segmented button {
+  min-height: 36px;
+  color: var(--muted);
+  background: transparent;
+}
+
+.segmented button.active {
+  color: #fff;
+  background: var(--primary);
+}
+
+.property-overview-list {
+  display: grid;
+  gap: 10px;
+}
+
+.property-compact-grid {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 5px;
+}
+
+.overview-property-card {
+  display: grid;
+  gap: 8px;
+  padding: 12px;
+  background: #fff;
+  background:
+    linear-gradient(90deg, color-mix(in srgb, var(--player-color) 16%, #ffffff), #ffffff 54%);
+  border: 1px solid var(--line);
+  border-left: 12px solid var(--player-color);
+  border-radius: 8px;
+}
+
+.overview-property-head {
+  display: flex;
+  justify-content: space-between;
+  gap: 8px;
+  align-items: flex-start;
+}
+
+.overview-property-head > div {
+  min-width: 0;
+  display: grid;
+  gap: 4px;
+}
+
+.overview-property-head strong,
+.overview-property-head span {
+  overflow-wrap: anywhere;
+}
+
+.overview-property-head span {
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.overview-property-meta {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 8px;
+}
+
+.overview-property-meta span {
+  min-width: 0;
+  padding: 8px;
+  color: var(--muted);
+  background: rgba(255, 255, 255, 0.72);
+  border: 1px solid rgba(220, 227, 224, 0.8);
+  border-radius: 8px;
+  font-size: 12px;
+}
+
+.overview-property-meta strong {
+  display: block;
+  margin-top: 2px;
+  color: var(--text);
+  font-size: 16px;
+  overflow-wrap: anywhere;
+}
+
+.overview-property-meta em {
+  display: block;
+  margin-top: 2px;
+  color: var(--muted);
+  font-size: 11px;
+  font-style: normal;
+  line-height: 1.35;
+}
+
+.compact-property-card {
+  min-width: 0;
+  display: grid;
+  gap: 2px;
+  padding: 6px 5px;
+  background:
+    linear-gradient(0deg, rgba(255, 255, 255, 0.72), rgba(255, 255, 255, 0.72)),
+    var(--player-color);
+  border: 1px solid color-mix(in srgb, var(--player-color) 58%, #ffffff);
+  border-top: 5px solid var(--player-color);
+  border-radius: 8px;
+}
+
+.compact-property-card.mortgaged {
+  opacity: 0.6;
+}
+
+.compact-property-card strong {
+  min-width: 0;
+  overflow-wrap: anywhere;
+  font-size: 10px;
+  line-height: 1.2;
+}
+
+.compact-property-top {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 4px;
+}
+
+.compact-property-top em {
+  min-width: 20px;
+  min-height: 15px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+  padding: 0 4px;
+  border-radius: 999px;
+  color: #fff;
+  font-size: 9px;
+  font-style: normal;
+  font-weight: 850;
+}
+
+.compact-house {
+  background: #1f9d5a;
+}
+
+.compact-hotel {
+  background: #c9332d;
+}
+
+.compact-property-card span {
+  min-width: 0;
+  overflow-wrap: anywhere;
+  font-size: 14px;
+  font-weight: 850;
+  line-height: 1.05;
+}
+
+.compact-property-card .building-markers {
+  min-height: 12px;
+  gap: 2px;
+}
+
+.compact-property-card .house-marker {
+  width: 9px;
+  height: 8px;
+}
+
+.compact-property-card .house-marker::before {
+  left: 1px;
+  top: -3px;
+  width: 7px;
+  height: 7px;
+}
+
+.compact-property-card .hotel-marker {
+  width: 12px;
+  height: 10px;
+}
+
+.compact-property-card .hotel-marker::before {
+  left: 2px;
+  top: -4px;
+  width: 8px;
+  height: 8px;
+}
+
 .player-dot {
   width: 9px;
   height: 9px;
@@ -807,6 +1101,21 @@ button.top-chip {
   45%,
   100% {
     transform: translateX(120%);
+  }
+}
+
+@keyframes bust-flash {
+  0%,
+  100% {
+    box-shadow:
+      0 0 0 2px rgba(189, 63, 50, 0.35),
+      0 8px 18px rgba(189, 63, 50, 0.12);
+  }
+
+  50% {
+    box-shadow:
+      0 0 0 4px rgba(189, 63, 50, 0.78),
+      0 10px 26px rgba(189, 63, 50, 0.28);
   }
 }
 
@@ -915,6 +1224,12 @@ button.top-chip {
 .form-grid {
   display: grid;
   gap: 12px;
+}
+
+.quick-adjust {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 8px;
 }
 
 .form-static {
