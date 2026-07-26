@@ -1,1 +1,24 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+    <title>BufPhone | 手机大富翁记分器</title>
+    <link rel="stylesheet" href="/styles.css" />
+  </head>
+  <body>
+    <div id="app"></div>
 
+    <dialog id="modal" class="modal">
+      <form class="modal-box">
+        <div class="modal-head">
+          <h2 id="modalTitle"></h2>
+          <button class="ghost icon-button" type="button" data-modal-close aria-label="关闭" title="关闭">×</button>
+        </div>
+        <div id="modalBody"></div>
+      </form>
+    </dialog>
+
+    <script src="/app.js"></script>
+  </body>
+</html>
