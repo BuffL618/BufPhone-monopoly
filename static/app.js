@@ -84,7 +84,8 @@ function canBuild(prop) {
 }
 
 function mortgageRedeemCost(prop) {
-  return Math.ceil(Number(prop.mortgageValue || prop.assetValue || 0) * 1.1);
+  const value = Math.trunc(Number(prop.mortgageValue || prop.assetValue || 0));
+  return Math.floor((value * 110 + 99) / 100);
 }
 
 function buildingBonusCount(prop) {
@@ -101,6 +102,10 @@ function rentTotal(prop, baseAmount = Number(prop.toll || 0)) {
 
 function colorSetExtra(prop) {
   return colorSetAmount(prop) * buildingBonusCount(prop);
+}
+
+function propertyRentValue(prop) {
+  return rentTotal(prop);
 }
 
 function renderBuildingMarkers(prop) {
@@ -603,13 +608,25 @@ function renderLogList(log) {
             <time>${escapeHtml(item.time)}</time>${escapeHtml(item.text)}
             ${item.undone ? `<span class="log-state">已撤回</span>` : ""}
           </div>
-          ${item.undoable && identity?.playerId === item.actorPlayerId ? `
-            <button
-              type="button"
-              class="secondary mini-button"
-              data-action="undo-log"
-              data-log-id="${item.id}"
-            >${pendingUndoLogId === item.id ? "确认" : "撤回"}</button>
+          ${identity?.playerId === item.actorPlayerId && (item.undoable || item.restorable) ? `
+            <div class="log-actions">
+              ${item.undoable ? `
+                <button
+                  type="button"
+                  class="secondary mini-button"
+                  data-action="undo-log"
+                  data-log-id="${item.id}"
+                >${pendingUndoLogId === item.id ? "确认" : "撤回"}</button>
+              ` : ""}
+              ${item.restorable ? `
+                <button
+                  type="button"
+                  class="secondary mini-button"
+                  data-action="restore-log"
+                  data-log-id="${item.id}"
+                >恢复</button>
+              ` : ""}
+            </div>
           ` : ""}
         </div>
       `).join("") : `<div class="empty">暂无记录</div>`}
@@ -740,9 +757,9 @@ function allPropertyItems() {
 function renderPropertyOverviewList(sortMode = propertySortMode) {
   const items = allPropertyItems();
   if (sortMode === "toll") {
-    items.sort((a, b) => Number(b.prop.toll || 0) - Number(a.prop.toll || 0) || a.playerIndex - b.playerIndex);
+    items.sort((a, b) => propertyRentValue(b.prop) - propertyRentValue(a.prop) || a.playerIndex - b.playerIndex);
   } else {
-    items.sort((a, b) => a.playerIndex - b.playerIndex || Number(b.prop.toll || 0) - Number(a.prop.toll || 0));
+    items.sort((a, b) => a.playerIndex - b.playerIndex || propertyRentValue(b.prop) - propertyRentValue(a.prop));
   }
 
   return `
@@ -1030,7 +1047,8 @@ function showSellBuilding(playerId, propertyId) {
 function showCashAdjust(playerId) {
   if (!requireMine(playerId)) return;
   const player = getPlayer(playerId);
-  const tenPercent = Math.floor(Math.abs(Number(player.cash || 0)) * 0.1);
+  const cashValue = Math.abs(Math.trunc(Number(player.cash || 0)));
+  const tenPercent = Math.floor((cashValue + 5) / 10);
   openModal(
     `${player.name} 自定义`,
     `
@@ -1070,16 +1088,20 @@ async function passStart(playerId) {
   if (pendingPassStartPlayerId !== playerId) {
     pendingPassStartPlayerId = playerId;
     clearTimeout(pendingPassStartTimer);
-    pendingPassStartTimer = setTimeout(() => {
-      pendingPassStartPlayerId = "";
-      render();
-    }, 2800);
+    pendingPassStartTimer = setTimeout(() => clearPendingPassStart(), 2800);
     render();
     return;
   }
+  clearPendingPassStart(false);
+  await postAction("passStart", { playerId });
+}
+
+function clearPendingPassStart(renderNow = true) {
+  if (!pendingPassStartPlayerId) return false;
   pendingPassStartPlayerId = "";
   clearTimeout(pendingPassStartTimer);
-  await postAction("passStart", { playerId });
+  if (renderNow) render();
+  return true;
 }
 
 function showRenamePlayer(playerId) {
@@ -1155,6 +1177,7 @@ function showCollectRent(receiverId = "") {
     return;
   }
   const receiver = getPlayer(receiverId);
+  const payers = room.players.filter((player) => player.id !== receiver.id);
   const rentProperties = receiver?.properties.filter((prop) => !prop.mortgaged) || [];
   if (!rentProperties.length) {
     showToast("你还没有可收钱的房产");
@@ -1167,7 +1190,7 @@ function showCollectRent(receiverId = "") {
         <div class="form-static"><span>收款玩家</span><strong>${escapeHtml(receiver.name)}</strong></div>
         <label>付款玩家
           <select name="payerId" id="payerSelect">
-            ${room.players.map((player) => `<option value="${player.id}" ${player.id === receiver.id ? "disabled" : ""}>${escapeHtml(player.name)}</option>`).join("")}
+            ${payers.map((player) => `<option value="${player.id}">${escapeHtml(player.name)}</option>`).join("")}
           </select>
         </label>
         <label>收钱房产
@@ -1188,7 +1211,6 @@ function showCollectRent(receiverId = "") {
     }),
   );
 
-  const payerSelect = qs("#payerSelect", modal);
   const propertySelect = qs("#propertySelect", modal);
   const rentAmount = qs("#rentAmount", modal);
   const rentPreview = qs("#rentPreview strong", modal);
@@ -1207,8 +1229,6 @@ function showCollectRent(receiverId = "") {
     propertySelect.innerHTML = rentProperties.map((prop) => `
       <option value="${prop.id}" data-toll="${prop.toll}">${escapeHtml(prop.name)} · ${formatMoney(rentTotal(prop))}</option>
     `).join("");
-    const next = qsa("option", payerSelect).find((option) => !option.disabled);
-    if (payerSelect.value === receiver.id && next) payerSelect.value = next.value;
     rentAmount.value = selectedRentProperty()?.toll || 0;
     syncRentAmount();
   }
@@ -1257,6 +1277,11 @@ async function undoLog(logId) {
   if (ok && modal.open) showLogModal();
 }
 
+async function restoreLog(logId) {
+  const ok = await postAction("restoreLog", { logId });
+  if (ok && modal.open) showLogModal();
+}
+
 function showQr() {
   if (!room) return;
   const link = joinLink();
@@ -1295,13 +1320,18 @@ function copyJoinLink() {
 document.addEventListener("click", async (event) => {
   if (event.target.closest("[data-modal-close]")) {
     event.preventDefault();
+    clearPendingPassStart();
     modal.close();
     return;
   }
 
   const target = event.target.closest("[data-action]");
-  if (!target) return;
+  if (!target) {
+    clearPendingPassStart();
+    return;
+  }
   const action = target.dataset.action;
+  if (action !== "pass-start") clearPendingPassStart();
 
   if (action === "create-room") {
     await createRoom();
@@ -1377,6 +1407,8 @@ document.addEventListener("click", async (event) => {
     showCollectRent(target.dataset.playerId);
   } else if (action === "undo-log") {
     await undoLog(target.dataset.logId);
+  } else if (action === "restore-log") {
+    await restoreLog(target.dataset.logId);
   }
 });
 
