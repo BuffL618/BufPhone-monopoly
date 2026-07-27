@@ -53,7 +53,9 @@ class Room:
             player["claimed"] = bool(player.pop("clientToken", None))
         for item in snapshot["log"]:
             item.pop("undo", None)
+            item.pop("restore", None)
             item["undoable"] = bool(item.get("undoable")) and not bool(item.get("undone"))
+            item["restorable"] = bool(item.get("restorable")) and bool(item.get("undone"))
         return snapshot
 
     def mutate(self, fn):
@@ -276,6 +278,13 @@ def mark_rent_event_undone(state: dict, log_id: str) -> None:
             return
 
 
+def mark_rent_event_restored(state: dict, log_id: str) -> None:
+    for event in state.setdefault("rentEvents", []):
+        if event.get("logId") == log_id:
+            event["undone"] = False
+            return
+
+
 def restore_property(player: dict, prop: dict) -> None:
     for index, item in enumerate(player["properties"]):
         if item["id"] == prop["id"]:
@@ -284,12 +293,80 @@ def restore_property(player: dict, prop: dict) -> None:
     player["properties"].append(clone(prop))
 
 
+def capture_restore(state: dict, entry: dict, undo: dict) -> dict:
+    undo_type = undo.get("type")
+
+    if undo_type == "renamePlayer":
+        player = find_player(state, undo["playerId"])
+        return {
+            "type": "renamePlayer",
+            "playerId": player["id"],
+            "name": player["name"],
+            "color": player.get("color", DEFAULT_PLAYER_COLORS[0]),
+        }
+
+    if undo_type == "addProperty":
+        player = find_player(state, undo["playerId"])
+        prop = find_property(player, undo["propertyId"])
+        return {"type": "addProperty", "playerId": player["id"], "property": clone(prop), "cost": undo["cost"]}
+
+    if undo_type == "updateProperty":
+        player = find_player(state, undo["playerId"])
+        prop = find_property(player, undo["propertyId"])
+        return {
+            "type": "updateProperty",
+            "playerId": player["id"],
+            "propertyId": prop["id"],
+            "name": prop["name"],
+            "toll": prop["toll"],
+            "colorSetAmount": prop.get("colorSetAmount", 0),
+        }
+
+    if undo_type in ("upgradeProperty", "mortgageProperty", "redeemProperty", "sellBuilding"):
+        player = find_player(state, undo["playerId"])
+        prop = find_property(player, undo["propertyId"])
+        return {
+            "type": undo_type,
+            "playerId": player["id"],
+            "propertyId": prop["id"],
+            "property": clone(prop),
+            "cost": undo.get("cost"),
+            "amount": undo.get("amount"),
+            "income": undo.get("income"),
+        }
+
+    if undo_type == "collectRent":
+        return {
+            "type": "collectRent",
+            "receiverId": undo["receiverId"],
+            "payerId": undo["payerId"],
+            "amount": undo["amount"],
+        }
+
+    if undo_type == "adjustCash":
+        return {"type": "adjustCash", "playerId": undo["playerId"], "delta": undo["delta"]}
+
+    if undo_type == "passStart":
+        return {"type": "passStart", "playerId": undo["playerId"], "amount": undo["amount"]}
+
+    if undo_type == "deleteProperty":
+        return {
+            "type": "deleteProperty",
+            "playerId": undo["playerId"],
+            "propertyId": undo["property"]["id"],
+        }
+
+    raise ValueError("未知撤回类型")
+
+
 def apply_undo(state: dict, entry: dict) -> None:
     undo = entry.get("undo")
     if not undo or entry.get("undone"):
         raise ValueError("这条记录不能撤回")
 
     undo_type = undo.get("type")
+    entry["restore"] = capture_restore(state, entry, undo)
+    entry["restorable"] = True
 
     if undo_type == "renamePlayer":
         player = find_player(state, undo["playerId"])
@@ -355,6 +432,81 @@ def apply_undo(state: dict, entry: dict) -> None:
         raise ValueError("未知撤回类型")
 
     entry["undone"] = True
+
+
+def apply_restore(state: dict, entry: dict) -> None:
+    restore = entry.get("restore")
+    if not restore or not entry.get("undone"):
+        raise ValueError("这条记录不能恢复")
+
+    restore_type = restore.get("type")
+
+    if restore_type == "renamePlayer":
+        player = find_player(state, restore["playerId"])
+        player["name"] = restore["name"]
+        player["color"] = restore["color"]
+
+    elif restore_type == "addProperty":
+        player = find_player(state, restore["playerId"])
+        player["cash"] -= restore["cost"]
+        restore_property(player, restore["property"])
+
+    elif restore_type == "updateProperty":
+        player = find_player(state, restore["playerId"])
+        prop = find_property(player, restore["propertyId"])
+        prop["name"] = restore["name"]
+        prop["toll"] = restore["toll"]
+        prop["colorSetAmount"] = restore.get("colorSetAmount", prop.get("colorSetAmount", 0))
+
+    elif restore_type == "upgradeProperty":
+        player = find_player(state, restore["playerId"])
+        prop = find_property(player, restore["propertyId"])
+        player["cash"] -= restore["cost"]
+        restore_property_in_place(prop, restore["property"])
+
+    elif restore_type == "mortgageProperty":
+        player = find_player(state, restore["playerId"])
+        prop = find_property(player, restore["propertyId"])
+        player["cash"] += restore["amount"]
+        restore_property_in_place(prop, restore["property"])
+
+    elif restore_type == "redeemProperty":
+        player = find_player(state, restore["playerId"])
+        prop = find_property(player, restore["propertyId"])
+        player["cash"] -= restore["cost"]
+        restore_property_in_place(prop, restore["property"])
+
+    elif restore_type == "sellBuilding":
+        player = find_player(state, restore["playerId"])
+        prop = find_property(player, restore["propertyId"])
+        player["cash"] += restore["income"]
+        restore_property_in_place(prop, restore["property"])
+
+    elif restore_type == "collectRent":
+        receiver = find_player(state, restore["receiverId"])
+        payer = find_player(state, restore["payerId"])
+        receiver["cash"] += restore["amount"]
+        payer["cash"] -= restore["amount"]
+        mark_rent_event_restored(state, entry["id"])
+
+    elif restore_type == "adjustCash":
+        player = find_player(state, restore["playerId"])
+        player["cash"] -= restore["delta"]
+
+    elif restore_type == "passStart":
+        player = find_player(state, restore["playerId"])
+        player["cash"] += restore["amount"]
+
+    elif restore_type == "deleteProperty":
+        player = find_player(state, restore["playerId"])
+        player["properties"] = [prop for prop in player["properties"] if prop["id"] != restore["propertyId"]]
+
+    else:
+        raise ValueError("未知恢复类型")
+
+    entry["undone"] = False
+    entry["restorable"] = False
+    entry.pop("restore", None)
 
 
 def apply_action(room: Room, payload: dict) -> dict:
@@ -708,6 +860,21 @@ def apply_action(room: Room, payload: dict) -> dict:
             append_log(
                 state,
                 f"{actor_player['name']} 撤回：{original_text}",
+                action_type=action_type,
+                actor_player_id=actor_player["id"],
+            )
+
+        elif action_type == "restoreLog":
+            actor_player = find_player(state, payload.get("actorPlayerId"))
+            require_actor(state, payload, actor_player["id"])
+            entry = find_log(state, payload.get("logId"))
+            if entry.get("actorPlayerId") != actor_player["id"]:
+                raise ValueError("只能恢复自己的操作")
+            original_text = entry["text"]
+            apply_restore(state, entry)
+            append_log(
+                state,
+                f"{actor_player['name']} 恢复：{original_text}",
                 action_type=action_type,
                 actor_player_id=actor_player["id"],
             )
